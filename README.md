@@ -1,3 +1,7 @@
+Command line control for Korad KA3005P and possibly others
+
+    $ cc -g -Wall -Wextra -Wpedantic -o koctl koctl.c
+
     $ ./koctl -h
     ===========
     == koctl ==
@@ -24,3 +28,19 @@
     of a second
     
     (C) 2021, Timo Buhrmester (contact: fstd+koctl@pr0.tips)
+    
+    $ ./koctl
+    16094791927	00.00 V	0.000 A	0.00 W
+    $ ./koctl -u7 -i1 -o1
+    $ ./koctl
+    16094791975	05.11 V	1.005 A	5.14 W
+    $ ./koctl -l
+    16094792000	05.11 V	1.005 A	5.14 W
+    16094792001	05.11 V	1.005 A	5.14 W
+    16094792002	05.11 V	1.005 A	5.14 W
+    16094792003	05.11 V	1.005 A	5.14 W
+    16094792004	05.11 V	1.005 A	5.14 W
+    ^C
+    $ ./koctl -o0 -q
+    16094792080	00.00 V	0.000 A	0.00 W
+    $ 
