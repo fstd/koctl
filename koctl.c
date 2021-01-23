@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <signal.h>
+#include <ctype.h>
 #include <termios.h>
 #include <fcntl.h>
 #include <sys/time.h>
@@ -21,12 +23,6 @@
 #include <inttypes.h>
 
 
-#define MODE_QRY 0
-#define MODE_SET 1
-#define MODE_LOG 2
-
-static int s_mode = MODE_QRY;
-
 // -1 means don't touch
 static int s_mv = -1;
 static int s_ma = -1;
@@ -35,8 +31,13 @@ static int s_ovp = -1;
 static int s_on = -1;
 static int s_lock = -1;
 
+static bool s_log;
 static bool s_qry;
-static char *s_dev;
+static FILE *s_dev;
+static char *s_tty;
+static bool s_kill;
+
+static volatile bool s_sigd = false;
 
 static int setup(const char *device);
 static void usage(FILE *str, const char *a0, int ec);
@@ -44,6 +45,7 @@ static void process_args(int argc, char **argv);
 static char *getln(FILE *f, char *buf, size_t bufsz);
 static char *formatnum(char *buf, size_t bufsz, int val);
 static int64_t now(void);
+static void qry(FILE *dev);
 
 int main(int argc, char **argv);
 
@@ -97,16 +99,18 @@ usage(FILE *str, const char *a0, int ec)
 	      "\t-L <1|0>: Enable/disable front panel lock\n"
 	      "\t-l: Log U/I/P to stdout\n"
 	      "\t-q: Force one U/I/P output\n"
+	      "\t-x: Try to disable output upon termination (use with -l)\n"
 	      "\t-h: Display brief usage statement and terminate\n"
 	      "\n"
 	      "When no options are given, -q is implied\n"
 	      "\n"
 	      "The output looks like this:\n"
-	      "16094778119\t20.32 V\t4.001 A\t81.30 W\n"
+	      "16094888334\tON\t12.72V\t(15.12V)\t2.504A\t(2.500A)\t31.85 W\t[CC] ...\n"
 	      "that is:\n"
-	      "16094778119(tab)20.32 V(tab)4.001 A(tab)81.30 W\n"
+	      "16094888334(tab)ON(tab)12.72V(tab)(15.12V)(tab)2.504A(tab)(2.500A)(tab)31.85 W(tab)[CC] ...\n"
 	      "where the first column is a unix timestamp in 10ths\n"
-	      "of a second\n"
+	      "of a second.  Values within parentheses are what's set,\n"
+	      "the others what's being delivered.\n"
 	      "\n"
 	      "(C) 2021, Timo Buhrmester (contact: fstd+koctl@pr0.tips)\n", a0);
 	exit(ec);
@@ -116,45 +120,49 @@ static void
 process_args(int argc, char **argv)
 {
 	char *a0 = argv[0];
-	s_mode = MODE_QRY;
-	s_dev = strdup(DEF_DEV);
+	bool qry = true;
+	s_tty = strdup(DEF_DEV);
 
-	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:")) != -1;) {
+	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:x")) != -1;) {
 		switch (ch) {
 		case 'd':
-			free(s_dev);
-			s_dev = strdup(optarg);
+			free(s_tty);
+			s_tty = strdup(optarg);
 			break;
 		case 'u':
-			s_mode = MODE_SET;
+			qry = false;
 			s_mv = (int)(strtod(optarg, NULL) * 1000);
 			if (s_mv < 0 || s_mv > 30000)
 				errx(EXIT_FAILURE, "out of range: %d mV", s_mv);
 			break;
 		case 'i':
-			s_mode = MODE_SET;
+			qry = false;
 			s_ma = (int)(strtod(optarg, NULL) * 1000);
 			if (s_ma < 0 || s_ma > 5000)
 				errx(EXIT_FAILURE, "out of range: %d mA", s_ma);
 			break;
 		case 'U':
-			s_mode = MODE_SET;
+			qry = false;
 			s_ovp = strtoul(optarg, NULL, 10);
 			break;
 		case 'I':
-			s_mode = MODE_SET;
+			qry = false;
 			s_ocp = strtoul(optarg, NULL, 10);
 			break;
 		case 'L':
-			s_mode = MODE_SET;
+			qry = false;
 			s_lock = strtoul(optarg, NULL, 10);
 			break;
 		case 'o':
-			s_mode = MODE_SET;
+			qry = false;
 			s_on = strtoul(optarg, NULL, 10);
 			break;
 		case 'l':
-			s_mode = MODE_LOG;
+			qry = false;
+			s_log = true;
+			break;
+		case 'x':
+			s_kill = true;
 			break;
 		case 'q':
 			s_qry = true;
@@ -166,6 +174,9 @@ process_args(int argc, char **argv)
 			usage(stderr, a0, EXIT_FAILURE);
 		}
 	}
+
+	if (!s_qry)
+		s_qry = qry;
 }
 
 
@@ -209,29 +220,112 @@ now(void)
 	return t.tv_sec * 1000000ll + t.tv_usec;
 }
 
+static void
+qry(FILE *dev)
+{
+	char tmpstr[16];
+	char auset[16], *puset = auset;
+	char auout[16], *puout = auout;
+	char aiset[16], *piset = aiset;
+	char aiout[16], *piout = aiout;
+
+	int64_t tnow = now();
+	fprintf(dev, "STATUS?\rVOUT1?\rIOUT1?\rVSET1?\rISET1?\r");
+	getln(dev, tmpstr, sizeof tmpstr);
+	getln(dev, auout, sizeof auout);
+	getln(dev, aiout, sizeof aiout);
+	getln(dev, auset, sizeof auset);
+	getln(dev, aiset, sizeof aiset);
+
+	while (puout[0] == '0' && isdigit(puout[1])) puout++;
+	while (puset[0] == '0' && isdigit(puset[1])) puset++;
+	while (piout[0] == '0' && isdigit(piout[1])) piout++;
+	while (piset[0] == '0' && isdigit(piset[1])) piset++;
+
+	uint8_t c = tmpstr[0];
+	bool on = c & 0x40u;
+
+	char cvcc[6] = "";
+	if (on)
+	    snprintf(cvcc, sizeof cvcc, "[%s] ", c & 0x01u ? "CV" : "CC");
+
+	char statstr[64];
+	snprintf(statstr, sizeof statstr, "%s%s%s%s",
+	    cvcc,
+	    c & 0x10u ? "" : "[beep off] ",
+	    c & 0x20u ? "[OCP on] " : "",
+	    c & 0x80u ? "[OVP on] " : "");
+
+	printf("%"PRIi64"\t%s\t%sV (%sV)\t%sA (%sA)\t%.2f W\t%s\n",
+	    tnow/100000,
+	    (uint8_t)c & 0x40 ? "ON" : "off",
+	    puout, puset, piout, piset,
+	    strtod(auout, NULL) * strtod(aiout, NULL),
+	    statstr);
+}
+
+void
+exithook(void)
+{
+	if (s_kill) {
+		fprintf(s_dev, "OUT0\r");
+	}
+	fclose(s_dev);
+}
+
+void
+sighnd(int sig)
+{
+	s_sigd = true;
+}
+
 int
 main(int argc, char **argv)
 {
 	process_args(argc, argv);
 
-	FILE *dev = fdopen(setup(s_dev), "w+");
-	if (!dev)
+	atexit(exithook);
+	signal(SIGINT, sighnd);
+	signal(SIGHUP, sighnd);
+	signal(SIGTERM, sighnd);
+
+	s_dev = fdopen(setup(s_tty), "w+");
+	if (!s_dev)
 		err(EXIT_FAILURE, "fdopen");
 
-	char ustr[16];
-	char istr[16];
+	char tmpstr[16];
 
-	if (s_mode == MODE_LOG) {
+	if (s_on == 0)
+		fprintf(s_dev, "OUT0\r");
+
+	if (s_mv >= 0) {
+		formatnum(tmpstr, sizeof tmpstr, s_mv);
+		fprintf(s_dev, "VSET1:%s\r", tmpstr);
+	}
+
+	if (s_ma >= 0) {
+		formatnum(tmpstr, sizeof tmpstr, s_ma);
+		fprintf(s_dev, "ISET1:%s\r", tmpstr);
+	}
+
+	if (s_ocp != -1)
+		fprintf(s_dev, "OCP%d\r", !!s_ocp);
+
+	if (s_ovp != -1)
+		fprintf(s_dev, "OVP%d\r", !!s_ovp);
+
+	if (s_lock != -1)
+		fprintf(s_dev, "LOCK%d\r", !!s_lock);
+
+	if (s_on >= 1)
+		fprintf(s_dev, "OUT1\r");
+
+	if (s_log) {
 		int64_t tnext = now();
-		for (;;) {
+		while (!s_sigd) {
 			int64_t tnow = now();
 			if (tnow >= tnext) {
-				fprintf(dev, "VOUT1?\rIOUT1?\r");
-				getln(dev, ustr, sizeof ustr);
-				getln(dev, istr, sizeof istr);
-				printf("%"PRIi64"\t%s V\t%s A\t%.2f W\n",
-				    tnow/100000, ustr, istr,
-				    strtod(ustr, NULL) * strtod(istr, NULL));
+				qry(s_dev);
 				tnext += 100000;
 			}
 
@@ -239,46 +333,8 @@ main(int argc, char **argv)
 			if (twait > 0)
 				usleep(twait);
 		}
-	}
+	} else if (s_qry)
+		qry(s_dev);
 
-	if (s_mode == MODE_SET) {
-		if (s_on == 0)
-			fprintf(dev, "OUT0\r");
-
-		if (s_mv >= 0) {
-			formatnum(ustr, sizeof ustr, s_mv);
-			fprintf(dev, "VSET1:%s\r", ustr);
-		}
-
-		if (s_ma >= 0) {
-			formatnum(istr, sizeof istr, s_ma);
-			fprintf(dev, "ISET1:%s\r", istr);
-		}
-
-		if (s_ocp != -1)
-			fprintf(dev, "OCP%d\r", !!s_ocp);
-
-		if (s_ovp != -1)
-			fprintf(dev, "OVP%d\r", !!s_ovp);
-
-		if (s_lock != -1)
-			fprintf(dev, "LOCK%d\r", !!s_lock);
-
-		if (s_on >= 1)
-			fprintf(dev, "OUT1\r");
-	}
-
-	if (s_mode == MODE_QRY || s_qry) {
-		int64_t tnow = now();
-		fprintf(dev, "VOUT1?\rIOUT1?\r");
-		getln(dev, ustr, sizeof ustr);
-		getln(dev, istr, sizeof istr);
-		printf("%"PRIi64"\t%s V\t%s A\t%.3f W\n",
-		    tnow/100000, ustr, istr,
-		    strtod(ustr, NULL) * strtod(istr, NULL));
-	}
-
-	fclose(dev);
-
-	return 0;
+	exit(0);
 }
