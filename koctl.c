@@ -30,6 +30,7 @@ static int s_ocp = -1;
 static int s_ovp = -1;
 static int s_on = -1;
 static int s_lock = -1;
+static unsigned long s_delay = 100; //ms
 
 static bool s_log;
 static bool s_reltime;
@@ -90,7 +91,7 @@ usage(FILE *str, const char *a0, int ec)
 	      "===========\n"
 	      "== koctl ==\n"
 	      "===========\n"
-	      "usage: %s [-d <dev>] [-u <volts>] [-i <amps>] [-{UIoL} 1|0] [-lrqh]\n"
+	      "usage: %s [-d <dev>] [-u <volts>] [-i <amps>] [-{UIoL} 1|0] [-D <ms>] [-lrqh]\n"
 	      "\t-d <device>: UART device (def: " DEF_DEV ")\n"
 	      "\t-u <voltage>: Set target voltage (0.0 - 30.0)\n"
 	      "\t-i <current>: Set target current (0.0 - 5.0)\n"
@@ -98,6 +99,7 @@ usage(FILE *str, const char *a0, int ec)
 	      "\t-I <1|0>: Enable/disable over-current protection\n"
 	      "\t-o <1|0>: Enable/disable output\n"
 	      "\t-L <1|0>: Enable/disable front panel lock\n"
+	      "\t-D <delay>: Delay between log messages in ms (for -l)\n"
 	      "\t-l: Log U/I/P to stdout\n"
 	      "\t-q: Force one U/I/P output\n"
 	      "\t-x: Try to disable output upon termination (use with -l)\n"
@@ -125,11 +127,16 @@ process_args(int argc, char **argv)
 	bool qry = true;
 	s_tty = strdup(DEF_DEV);
 
-	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:xr")) != -1;) {
+	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:xrD:")) != -1;) {
 		switch (ch) {
 		case 'd':
 			free(s_tty);
 			s_tty = strdup(optarg);
+			break;
+		case 'D':
+			s_delay = strtoul(optarg, NULL, 10);
+			if (s_delay < 100)
+				errx(EXIT_FAILURE, "delay out of range: min. 100ms");
 			break;
 		case 'u':
 			qry = false;
@@ -341,7 +348,7 @@ main(int argc, char **argv)
 			int64_t tnow = now();
 			if (tnow >= tnext) {
 				qry(s_dev);
-				tnext += 100000;
+				tnext += s_delay * 1000ul;
 			}
 
 			int64_t twait = tnext - now();
