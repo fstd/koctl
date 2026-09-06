@@ -32,6 +32,7 @@ static int s_on = -1;
 static int s_lock = -1;
 
 static bool s_log;
+static bool s_reltime;
 static bool s_qry;
 static FILE *s_dev;
 static char *s_tty;
@@ -123,7 +124,7 @@ process_args(int argc, char **argv)
 	bool qry = true;
 	s_tty = strdup(DEF_DEV);
 
-	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:x")) != -1;) {
+	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:xr")) != -1;) {
 		switch (ch) {
 		case 'd':
 			free(s_tty);
@@ -156,6 +157,9 @@ process_args(int argc, char **argv)
 		case 'o':
 			qry = false;
 			s_on = strtoul(optarg, NULL, 10);
+			break;
+		case 'r':
+			s_reltime = true;
 			break;
 		case 'l':
 			qry = false;
@@ -229,7 +233,15 @@ qry(FILE *dev)
 	char aiset[16], *piset = aiset;
 	char aiout[16], *piout = aiout;
 
+	static int64_t toff;
 	int64_t tnow = now();
+	if (s_reltime) {
+		if (!toff)
+			toff = tnow;
+		else
+			tnow -= toff;
+	}
+
 	fprintf(dev, "STATUS?\rVOUT1?\rIOUT1?\rVSET1?\rISET1?\r");
 	getln(dev, tmpstr, sizeof tmpstr);
 	getln(dev, auout, sizeof auout);
@@ -322,6 +334,7 @@ main(int argc, char **argv)
 
 	if (s_log) {
 		int64_t tnext = now();
+		int64_t toff = tnext; // if reltime
 		while (!s_sigd) {
 			int64_t tnow = now();
 			if (tnow >= tnext) {
