@@ -90,7 +90,7 @@ usage(FILE *str, const char *a0, int ec)
 	      "===========\n"
 	      "== koctl ==\n"
 	      "===========\n"
-	      "usage: %s [-d <dev>] [-u <volts>] [-i <amps>] [-{UIoL} 1|0] [-lqh]\n"
+	      "usage: %s [-d <dev>] [-u <volts>] [-i <amps>] [-{UIoL} 1|0] [-lrqh]\n"
 	      "\t-d <device>: UART device (def: " DEF_DEV ")\n"
 	      "\t-u <voltage>: Set target voltage (0.0 - 30.0)\n"
 	      "\t-i <current>: Set target current (0.0 - 5.0)\n"
@@ -101,6 +101,7 @@ usage(FILE *str, const char *a0, int ec)
 	      "\t-l: Log U/I/P to stdout\n"
 	      "\t-q: Force one U/I/P output\n"
 	      "\t-x: Try to disable output upon termination (use with -l)\n"
+	      "\t-r: Use relative timestamps in log mode\n"
 	      "\t-h: Display brief usage statement and terminate\n"
 	      "\n"
 	      "When no options are given, -q is implied\n"
@@ -236,9 +237,10 @@ qry(FILE *dev)
 	static int64_t toff;
 	int64_t tnow = now();
 	if (s_reltime) {
-		if (!toff)
+		if (!toff) {
 			toff = tnow;
-		else
+			tnow = 0;
+		} else
 			tnow -= toff;
 	}
 
