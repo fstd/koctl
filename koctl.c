@@ -36,6 +36,7 @@ static bool s_log;
 static bool s_reltime;
 static bool s_qry;
 static FILE *s_dev;
+static FILE *s_outfile;
 static char *s_tty;
 static bool s_kill;
 
@@ -47,7 +48,7 @@ static void process_args(int argc, char **argv);
 static char *getln(FILE *f, char *buf, size_t bufsz);
 static char *formatnum(char *buf, size_t bufsz, int val);
 static int64_t now(void);
-static void qry(FILE *dev);
+static void qry(FILE *dev, FILE *trg);
 
 int main(int argc, char **argv);
 
@@ -100,7 +101,8 @@ usage(FILE *str, const char *a0, int ec)
 	      "\t-o <1|0>: Enable/disable output\n"
 	      "\t-L <1|0>: Enable/disable front panel lock\n"
 	      "\t-D <delay>: Delay between log messages in ms (for -l)\n"
-	      "\t-l: Log U/I/P to stdout\n"
+	      "\t-l: Continuously log U/I/P to stdout or file given by -O\n"
+	      "\t-O: Path to logfile if -l is used\n"
 	      "\t-q: Force one U/I/P output\n"
 	      "\t-x: Try to disable output upon termination (use with -l)\n"
 	      "\t-r: Use relative timestamps in log mode\n"
@@ -127,7 +129,7 @@ process_args(int argc, char **argv)
 	bool qry = true;
 	s_tty = strdup(DEF_DEV);
 
-	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:xrD:")) != -1;) {
+	for(int ch; (ch = getopt(argc, argv, "hd:u:i:U:I:o:lqL:xrD:O:")) != -1;) {
 		switch (ch) {
 		case 'd':
 			free(s_tty);
@@ -165,6 +167,11 @@ process_args(int argc, char **argv)
 		case 'o':
 			qry = false;
 			s_on = strtoul(optarg, NULL, 10);
+			break;
+		case 'O':
+			s_outfile = fopen(optarg, "a");
+			if (!s_outfile)
+				err(EXIT_FAILURE, "fopen %s", optarg);
 			break;
 		case 'r':
 			s_reltime = true;
@@ -233,7 +240,7 @@ now(void)
 }
 
 static void
-qry(FILE *dev)
+qry(FILE *dev, FILE *trg)
 {
 	char tmpstr[16];
 	char auset[16], *puset = auset;
@@ -277,12 +284,13 @@ qry(FILE *dev)
 	    c & 0x20u ? "[OCP on] " : "",
 	    c & 0x80u ? "[OVP on] " : "");
 
-	printf("%"PRIi64"\t%s\t%sV (%sV)\t%sA (%sA)\t%.2f W\t%s\n",
+	fprintf(trg, "%"PRIi64"\t%s\t%sV (%sV)\t%sA (%sA)\t%.2f W\t%s\n",
 	    tnow/100000,
 	    (uint8_t)c & 0x40 ? "ON" : "off",
 	    puout, puset, piout, piset,
 	    strtod(auout, NULL) * strtod(aiout, NULL),
 	    statstr);
+	fflush(trg);
 }
 
 void
@@ -292,6 +300,7 @@ exithook(void)
 		fprintf(s_dev, "OUT0\r");
 	}
 	fclose(s_dev);
+	fclose(s_outfile);
 }
 
 void
@@ -303,6 +312,7 @@ sighnd(int sig)
 int
 main(int argc, char **argv)
 {
+	s_outfile = stdout;
 	process_args(argc, argv);
 
 	atexit(exithook);
@@ -347,7 +357,7 @@ main(int argc, char **argv)
 		while (!s_sigd) {
 			int64_t tnow = now();
 			if (tnow >= tnext) {
-				qry(s_dev);
+				qry(s_dev, s_outfile);
 				tnext += s_delay * 1000ul;
 			}
 
@@ -356,7 +366,7 @@ main(int argc, char **argv)
 				usleep(twait);
 		}
 	} else if (s_qry)
-		qry(s_dev);
+		qry(s_dev, s_outfile);
 
 	exit(0);
 }
